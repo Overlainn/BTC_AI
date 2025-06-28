@@ -1,80 +1,77 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-import joblib
-import ccxt
+import tensorflow as tf
 from keras.models import load_model
-from ta import add_all_ta_features
-from ta.trend import EMAIndicator, MACD
-from ta.momentum import RSIIndicator, ROCIndicator
-from ta.volatility import AverageTrueRange
-from ta.volume import OnBalanceVolumeIndicator
-from datetime import datetime, timedelta
-import pytz
+from sklearn.preprocessing import StandardScaler
+import ta
 
-# Constants
-COIN = "BTC/USDT"
-INTERVAL = '5m'
-TIMEZONE = 'America/New_York'
-LOOKBACK = 150
+st.set_page_config(page_title="BTC AI Dashboard", layout="wide")
+st.title("📈 BTC AI Trading Dashboard (30-min Intervals)")
 
-# Load model and scaler
+# ✅ Load data
+data = pd.read_csv("btc_15min_data.csv")
+data['datetime'] = pd.to_datetime(data['datetime'])
+data.set_index('datetime', inplace=True)
+data = data.sort_index()
+
+# ✅ Resample to 30-minute intervals
+data_30min = data.resample('30min').agg({
+    'open': 'first',
+    'high': 'max',
+    'low': 'min',
+    'close': 'last',
+    'volume': 'sum'
+}).dropna()
+
+# ✅ Recompute technical indicators (ta works with DataFrame)
+data_30min['EMA9'] = ta.trend.ema_indicator(data_30min['close'], window=9).fillna(0)
+data_30min['EMA21'] = ta.trend.ema_indicator(data_30min['close'], window=21).fillna(0)
+data_30min['VWAP'] = ta.volume.volume_weighted_average_price(
+    data_30min['high'], data_30min['low'], data_30min['close'], data_30min['volume'], window=14
+).fillna(0)
+data_30min['RSI'] = ta.momentum.RSIIndicator(data_30min['close']).rsi().fillna(0)
+macd = ta.trend.macd(data_30min['close'])
+data_30min['MACD'] = macd.macd_diff().fillna(0)
+data_30min['ATR'] = ta.volatility.average_true_range(data_30min['high'], data_30min['low'], data_30min['close']).fillna(0)
+data_30min['ROC'] = ta.momentum.ROCIndicator(data_30min['close']).roc().fillna(0)
+data_30min['OBV'] = ta.volume.on_balance_volume(data_30min['close'], data_30min['volume']).fillna(0)
+
+# ✅ Select features for model input
+feature_cols = ['EMA9', 'EMA21', 'VWAP', 'RSI', 'MACD', 'ATR', 'ROC', 'OBV']
+X = data_30min[feature_cols].copy().dropna()
+
+# ✅ Load scaler from .npy files (not joblib)
+scaler = StandardScaler()
+scaler.mean_ = np.load("scaler_mean.npy", allow_pickle=True)
+scaler.scale_ = np.load("scaler_scale.npy", allow_pickle=True)
+X_scaled = scaler.transform(X)
+
+# ✅ Load trained LSTM model
 model = load_model("btc_lstm_model.keras")
-scaler = joblib.load("scaler.joblib")
 
-# Fetch historical OHLCV data
-def fetch_ohlcv(symbol, timeframe='5m', limit=150):
-    exchange = ccxt.coinbase()
-    ohlcv = exchange.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
-    df = pd.DataFrame(ohlcv, columns=["timestamp", "open", "high", "low", "close", "volume"])
-    df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms').dt.tz_localize('UTC').dt.tz_convert(TIMEZONE)
-    return df
+# ✅ Create sequences (last 20 steps for LSTM input)
+SEQUENCE_LENGTH = 20
+sequences = []
+timestamps = []
 
-# Add all required indicators
-def add_indicators(df):
-    df['EMA9'] = EMAIndicator(close=df['close'], window=9).ema_indicator()
-    df['EMA21'] = EMAIndicator(close=df['close'], window=21).ema_indicator()
-    df['VWAP'] = (df['volume'] * (df['high'] + df['low'] + df['close']) / 3).cumsum() / df['volume'].cumsum()
-    macd = MACD(close=df['close'])
-    df['MACD'] = macd.macd()
-    df['MACD_Signal'] = macd.macd_signal()
-    df['RSI'] = RSIIndicator(close=df['close']).rsi()
-    df['ATR'] = AverageTrueRange(high=df['high'], low=df['low'], close=df['close']).average_true_range()
-    df['ROC'] = ROCIndicator(close=df['close']).roc()
-    df['OBV'] = OnBalanceVolumeIndicator(close=df['close'], volume=df['volume']).on_balance_volume()
-    df = df.dropna()
-    return df
+for i in range(SEQUENCE_LENGTH, len(X_scaled)):
+    sequences.append(X_scaled[i-SEQUENCE_LENGTH:i])
+    timestamps.append(X.index[i])
 
-# Prepare features
-def prepare_input(df):
-    features = ['EMA9', 'EMA21', 'VWAP', 'RSI', 'MACD', 'MACD_Signal', 'ATR', 'ROC', 'OBV']
-    X = scaler.transform(df[features])
-    return np.expand_dims(X, axis=0)
+X_seq = np.array(sequences)
 
-# Predict class
-def predict_class(df):
-    x_input = prepare_input(df.tail(LOOKBACK))
-    pred = model.predict(x_input)
-    pred_class = np.argmax(pred, axis=1)[0]
-    return pred_class
+# ✅ Predict
+preds = model.predict(X_seq, verbose=0)
+classes = np.argmax(preds, axis=1)  # 0=Short, 1=Neutral, 2=Long
 
-# Map prediction class to text
-def class_to_label(pred_class):
-    return {0: "Short", 1: "Neutral", 2: "Long"}.get(pred_class, "Unknown")
+# ✅ Build final table
+results = pd.DataFrame({
+    'Timestamp': timestamps,
+    'Prediction': classes
+})
+results['Prediction Label'] = results['Prediction'].map({0: 'Short 📉', 1: 'Neutral ⚖️', 2: 'Long 📈'})
 
-# Streamlit dashboard
-st.set_page_config(page_title="BTC AI", layout="wide", page_icon="🧠")
-st.title("🧠 BTC AI Trading Dashboard")
-
-tab1, tab2, tab3 = st.tabs(["BTC", "ETH", "SOL"])
-
-with tab1:
-    st.subheader("🔍 BTC/USDT 5-Minute Prediction")
-    df = fetch_ohlcv("BTC/USDT", INTERVAL, LOOKBACK + 50)
-    df = add_indicators(df)
-    pred_class = predict_class(df)
-    label = class_to_label(pred_class)
-    st.metric("📈 AI Prediction", label)
-    st.dataframe(df.tail(5).set_index("timestamp"), use_container_width=True)
-
-# You can duplicate this logic in tab2 and tab3 for ETH and SOL with minor edits
+# ✅ Display table
+st.subheader("🔮 BTC Class Predictions (Next 3 Candles / 90 Min Horizon)")
+st.dataframe(results.set_index('Timestamp').tail(20), use_container_width=True)

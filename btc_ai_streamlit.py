@@ -3,17 +3,21 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-import joblib
+from sklearn.preprocessing import StandardScaler
 from tensorflow.keras.models import load_model
 import plotly.graph_objs as go
 import ccxt
 import ta
 
-# Load scaler and model
-scaler = joblib.load("scaler.joblib")
+# ✅ Load scaler manually from .npy files (no joblib needed)
+scaler = StandardScaler()
+scaler.mean_ = np.load("scaler_mean.npy")
+scaler.scale_ = np.load("scaler_scale.npy")
+
+# ✅ Load the trained model
 model = load_model("btc_lstm_model.keras")
 
-# Fetch latest BTC/USDT 15‑minute data
+# ✅ Fetch latest BTC/USDT 15-minute data
 @st.cache_data(ttl=300)
 def fetch_data():
     exchange = ccxt.coinbasepro()
@@ -24,7 +28,7 @@ def fetch_data():
     df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
     return df
 
-# Add technical indicators
+# ✅ Add technical indicators
 def add_indicators(df):
     df = df.copy()
     df['EMA9'] = ta.trend.ema_indicator(df['close'], window=9)
@@ -39,7 +43,7 @@ def add_indicators(df):
     df['OBV'] = ta.volume.on_balance_volume(df['close'], df['volume'])
     return df.dropna().reset_index(drop=True)
 
-# Prepare input and predict
+# ✅ Prepare input and predict
 def predict(df):
     features = ['EMA9', 'EMA21', 'VWAP', 'RSI', 'MACD', 'MACD_Signal', 'ATR', 'ROC', 'OBV']
     seq = df[features].values[-60:]
@@ -49,7 +53,7 @@ def predict(df):
     pred = np.argmax(probs)
     return pred, probs
 
-# Streamlit UI
+# ✅ Streamlit UI
 st.title("BTC 15‑Min AI Predictor")
 df = fetch_data()
 df = add_indicators(df)
@@ -64,11 +68,13 @@ st.subheader("Confidence Stats")
 conf = {cls[i]: f"{probs[i]*100:.1f}%" for i in range(len(probs))}
 st.write(conf)
 
-# Price chart with signal markers
+# ✅ Price chart with signal markers
 df_plot = df.iloc[-1:]
 fig = go.Figure()
 fig.add_trace(go.Scatter(x=df['timestamp'], y=df['close'], mode='lines', name='Close'))
-fig.add_trace(go.Scatter(x=df_plot['timestamp'], y=df_plot['close'],
-                         mode='markers', name='Signal',
-                         marker=dict(color=['red','white','green'][pred], size=12)))
+fig.add_trace(go.Scatter(
+    x=df_plot['timestamp'], y=df_plot['close'],
+    mode='markers', name='Signal',
+    marker=dict(color=['red', 'white', 'green'][pred], size=12)
+))
 st.plotly_chart(fig, use_container_width=True)

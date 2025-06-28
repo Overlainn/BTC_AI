@@ -7,7 +7,7 @@ from sklearn.preprocessing import StandardScaler
 import ta
 
 st.set_page_config(page_title="BTC AI Dashboard", layout="wide")
-st.title("\ud83d\udcc8 BTC AI Trading Dashboard (30-min Intervals)")
+st.title("📈 BTC AI Trading Dashboard (30-min Intervals)")
 
 # ✅ Load data
 data = pd.read_csv("btc_15min_data.csv")
@@ -74,8 +74,8 @@ results = pd.DataFrame({
     'Timestamp': timestamps,
     'Prediction': classes
 })
-results['Prediction Label'] = results['Prediction'].map({0: 'Short \ud83d\udcc9', 1: 'Neutral \u2696\ufe0f', 2: 'Long \ud83d\udcc8'})
+results['Prediction Label'] = results['Prediction'].map({0: 'Short 📉', 1: 'Neutral ⚖️', 2: 'Long 📈'})
 
 # ✅ Display table
-st.subheader("\ud83d\udd2e BTC Class Predictions (Next 3 Candles / 90 Min Horizon)")
+st.subheader("🔮 BTC Class Predictions (Next 3 Candles / 90 Min Horizon)")
 st.dataframe(results.set_index('Timestamp').tail(20), use_container_width=True)

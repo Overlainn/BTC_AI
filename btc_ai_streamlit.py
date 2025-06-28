@@ -32,9 +32,12 @@ data_30min['VWAP'] = ta.volume.volume_weighted_average_price(
     data_30min['high'], data_30min['low'], data_30min['close'], data_30min['volume'], window=14
 ).fillna(0)
 data_30min['RSI'] = ta.momentum.RSIIndicator(data_30min['close']).rsi().fillna(0)
-macd = ta.trend.macd(data_30min['close'])
+
+# ✅ Correct MACD instantiation
+macd = ta.trend.MACD(data_30min['close'])
 data_30min['MACD'] = macd.macd_diff().fillna(0)
 data_30min['MACD_Signal'] = macd.macd_signal().fillna(0)
+
 data_30min['ATR'] = ta.volatility.average_true_range(
     data_30min['high'], data_30min['low'], data_30min['close']
 ).fillna(0)

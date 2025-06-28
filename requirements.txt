@@ -6,3 +6,4 @@ ccxt
 ta
 plotly
 joblib
+scikit-learn

@@ -1,82 +1,80 @@
-# Force rebuild with Python 3.10
-
 import streamlit as st
 import pandas as pd
 import numpy as np
 import joblib
-from tensorflow.keras.models import load_model
-import plotly.graph_objs as go
 import ccxt
-import ta
+from keras.models import load_model
+from ta import add_all_ta_features
+from ta.trend import EMAIndicator, MACD
+from ta.momentum import RSIIndicator, ROCIndicator
+from ta.volatility import AverageTrueRange
+from ta.volume import OnBalanceVolumeIndicator
+from datetime import datetime, timedelta
+import pytz
 
-# ✅ Load scaler using joblib
+# Constants
+COIN = "BTC/USDT"
+INTERVAL = '5m'
+TIMEZONE = 'America/New_York'
+LOOKBACK = 150
+
+# Load model and scaler
+model = load_model("btc_lstm_model.keras")
 scaler = joblib.load("scaler.joblib")
 
-# ✅ Load the trained LSTM model
-model = load_model("btc_lstm_model.keras")
-
-# ✅ Fetch BTC/USDT 15-minute data from Coinbase Pro
-@st.cache_data(ttl=300)
-def fetch_data():
-    exchange = ccxt.coinbasepro()
-    now = exchange.milliseconds()
-    since = now - 15 * 60 * 1000 * 500  # ~125 hours of data
-    ohlcv = exchange.fetch_ohlcv('BTC/USDT', '15m', since=since)
-    df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-    df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+# Fetch historical OHLCV data
+def fetch_ohlcv(symbol, timeframe='5m', limit=150):
+    exchange = ccxt.coinbase()
+    ohlcv = exchange.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
+    df = pd.DataFrame(ohlcv, columns=["timestamp", "open", "high", "low", "close", "volume"])
+    df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms').dt.tz_localize('UTC').dt.tz_convert(TIMEZONE)
     return df
 
-# ✅ Add TA indicators
+# Add all required indicators
 def add_indicators(df):
-    df = df.copy()
-    df['EMA9'] = ta.trend.ema_indicator(df['close'], window=9)
-    df['EMA21'] = ta.trend.ema_indicator(df['close'], window=21)
-    df['VWAP'] = ta.volume.volume_weighted_average_price(df['high'], df['low'], df['close'], df['volume'])
-    df['RSI'] = ta.momentum.rsi(df['close'])
-    macd = ta.trend.MACD(df['close'])
+    df['EMA9'] = EMAIndicator(close=df['close'], window=9).ema_indicator()
+    df['EMA21'] = EMAIndicator(close=df['close'], window=21).ema_indicator()
+    df['VWAP'] = (df['volume'] * (df['high'] + df['low'] + df['close']) / 3).cumsum() / df['volume'].cumsum()
+    macd = MACD(close=df['close'])
     df['MACD'] = macd.macd()
     df['MACD_Signal'] = macd.macd_signal()
-    df['ATR'] = ta.volatility.average_true_range(df['high'], df['low'], df['close'])
-    df['ROC'] = ta.momentum.roc(df['close'])
-    df['OBV'] = ta.volume.on_balance_volume(df['close'], df['volume'])
-    return df.dropna().reset_index(drop=True)
+    df['RSI'] = RSIIndicator(close=df['close']).rsi()
+    df['ATR'] = AverageTrueRange(high=df['high'], low=df['low'], close=df['close']).average_true_range()
+    df['ROC'] = ROCIndicator(close=df['close']).roc()
+    df['OBV'] = OnBalanceVolumeIndicator(close=df['close'], volume=df['volume']).on_balance_volume()
+    df = df.dropna()
+    return df
 
-# ✅ Format for model and get prediction
-def predict(df):
+# Prepare features
+def prepare_input(df):
     features = ['EMA9', 'EMA21', 'VWAP', 'RSI', 'MACD', 'MACD_Signal', 'ATR', 'ROC', 'OBV']
-    seq = df[features].values[-60:]
-    seq_scaled = scaler.transform(seq)
-    X = np.expand_dims(seq_scaled, axis=0)
-    probs = model.predict(X)[0]
-    pred = np.argmax(probs)
-    return pred, probs
+    X = scaler.transform(df[features])
+    return np.expand_dims(X, axis=0)
 
-# ✅ Streamlit App
-st.set_page_config(layout="wide", page_title="BTC AI Predictor")
-st.title("🚀 BTC 15‑Minute AI Prediction Dashboard")
+# Predict class
+def predict_class(df):
+    x_input = prepare_input(df.tail(LOOKBACK))
+    pred = model.predict(x_input)
+    pred_class = np.argmax(pred, axis=1)[0]
+    return pred_class
 
-df = fetch_data()
-df = add_indicators(df)
+# Map prediction class to text
+def class_to_label(pred_class):
+    return {0: "Short", 1: "Neutral", 2: "Long"}.get(pred_class, "Unknown")
 
-pred, probs = predict(df)
-cls = {0: "Short (🔴)", 1: "Neutral (⚪)", 2: "Long (🟢)"}
+# Streamlit dashboard
+st.set_page_config(page_title="BTC AI", layout="wide", page_icon="🧠")
+st.title("🧠 BTC AI Trading Dashboard")
 
-# ✅ Prediction Output
-st.subheader("Latest Prediction")
-st.markdown(f"### {cls[pred]}")
+tab1, tab2, tab3 = st.tabs(["BTC", "ETH", "SOL"])
 
-# ✅ Confidence Stats
-st.subheader("Prediction Confidence")
-conf = {cls[i]: f"{probs[i]*100:.1f}%" for i in range(len(probs))}
-st.write(conf)
+with tab1:
+    st.subheader("🔍 BTC/USDT 5-Minute Prediction")
+    df = fetch_ohlcv("BTC/USDT", INTERVAL, LOOKBACK + 50)
+    df = add_indicators(df)
+    pred_class = predict_class(df)
+    label = class_to_label(pred_class)
+    st.metric("📈 AI Prediction", label)
+    st.dataframe(df.tail(5).set_index("timestamp"), use_container_width=True)
 
-# ✅ Plot price and prediction marker
-df_plot = df.iloc[-1:]
-fig = go.Figure()
-fig.add_trace(go.Scatter(x=df['timestamp'], y=df['close'], mode='lines', name='Close'))
-fig.add_trace(go.Scatter(
-    x=df_plot['timestamp'], y=df_plot['close'],
-    mode='markers', name='Signal',
-    marker=dict(color=['red','white','green'][pred], size=12)
-))
-st.plotly_chart(fig, use_container_width=True)
+# You can duplicate this logic in tab2 and tab3 for ETH and SOL with minor edits

@@ -32,12 +32,9 @@ data_30min['VWAP'] = ta.volume.volume_weighted_average_price(
     data_30min['high'], data_30min['low'], data_30min['close'], data_30min['volume'], window=14
 ).fillna(0)
 data_30min['RSI'] = ta.momentum.RSIIndicator(data_30min['close']).rsi().fillna(0)
-
-# ✅ Correct MACD instantiation
-macd = ta.trend.MACD(data_30min['close'])
-data_30min['MACD'] = macd.macd_diff().fillna(0)
-data_30min['MACD_Signal'] = macd.macd_signal().fillna(0)
-
+macd_ind = ta.trend.MACD(data_30min['close'])
+data_30min['MACD'] = macd_ind.macd_diff().fillna(0)
+data_30min['MACD_Signal'] = macd_ind.macd_signal().fillna(0)
 data_30min['ATR'] = ta.volatility.average_true_range(
     data_30min['high'], data_30min['low'], data_30min['close']
 ).fillna(0)
@@ -54,8 +51,8 @@ scaler.mean_ = np.load("scaler_mean.npy")
 scaler.scale_ = np.load("scaler_scale.npy")
 X_scaled = scaler.transform(X)
 
-# ✅ Load trained LSTM model
-model = load_model("btc_lstm_model.keras")
+# ✅ Load trained LSTM model (use compile=False to avoid errors)
+model = load_model("btc_lstm_model.keras", compile=False)
 
 # ✅ Create sequences (last 20 steps for LSTM input)
 SEQUENCE_LENGTH = 20

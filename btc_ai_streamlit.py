@@ -1,80 +1,77 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-import joblib
-from tensorflow.keras.models import load_model
-import plotly.graph_objs as go
+import tensorflow as tf
+from keras.models import load_model
+from sklearn.preprocessing import StandardScaler
 import ta
 
-# ✅ Load scaler using joblib
-scaler = joblib.load("scaler.joblib")
+st.set_page_config(page_title="BTC AI Dashboard", layout="wide")
+st.title("📈 BTC AI Trading Dashboard (30-min Intervals)")
+
+# ✅ Load data
+data = pd.read_csv("btc_15min_data.csv")
+data['datetime'] = pd.to_datetime(data['datetime'])
+data.set_index('datetime', inplace=True)
+data = data.sort_index()
+
+# ✅ Resample to 30-minute intervals
+data_30min = data.resample('30min').agg({
+    'open': 'first',
+    'high': 'max',
+    'low': 'min',
+    'close': 'last',
+    'volume': 'sum'
+}).dropna()
+
+# ✅ Recompute technical indicators (ta works with DataFrame)
+data_30min['EMA9'] = ta.trend.ema_indicator(data_30min['close'], window=9).fillna(0)
+data_30min['EMA21'] = ta.trend.ema_indicator(data_30min['close'], window=21).fillna(0)
+data_30min['VWAP'] = ta.volume.volume_weighted_average_price(
+    data_30min['high'], data_30min['low'], data_30min['close'], data_30min['volume'], window=14
+).fillna(0)
+data_30min['RSI'] = ta.momentum.RSIIndicator(data_30min['close']).rsi().fillna(0)
+macd = ta.trend.macd(data_30min['close'])
+data_30min['MACD'] = macd.macd_diff().fillna(0)
+data_30min['ATR'] = ta.volatility.average_true_range(data_30min['high'], data_30min['low'], data_30min['close']).fillna(0)
+data_30min['ROC'] = ta.momentum.ROCIndicator(data_30min['close']).roc().fillna(0)
+data_30min['OBV'] = ta.volume.on_balance_volume(data_30min['close'], data_30min['volume']).fillna(0)
+
+# ✅ Select features for model input
+feature_cols = ['EMA9', 'EMA21', 'VWAP', 'RSI', 'MACD', 'ATR', 'ROC', 'OBV']
+X = data_30min[feature_cols].copy().dropna()
+
+# ✅ Load scaler from .npy files (not joblib)
+scaler = StandardScaler()
+scaler.mean_ = np.load("scaler_mean.npy", allow_pickle=True)
+scaler.scale_ = np.load("scaler_scale.npy", allow_pickle=True)
+X_scaled = scaler.transform(X)
 
 # ✅ Load trained LSTM model
 model = load_model("btc_lstm_model.keras")
 
-# ✅ Load BTC/USDT 15-min historical data from CSV
-@st.cache_data(ttl=300)
-def load_data():
-    df = pd.read_csv("btc_15min_data.csv")
-    df['timestamp'] = pd.to_datetime(df['timestamp'])
-    return df
+# ✅ Create sequences (last 20 steps for LSTM input)
+SEQUENCE_LENGTH = 20
+sequences = []
+timestamps = []
 
-# ✅ Add technical indicators using `ta` library
-def add_indicators(df):
-    df = df.copy()
-    df['EMA9'] = ta.trend.ema_indicator(df['close'], window=9)
-    df['EMA21'] = ta.trend.ema_indicator(df['close'], window=21)
-    df['VWAP'] = ta.volume.volume_weighted_average_price(df['high'], df['low'], df['close'], df['volume'])
-    df['RSI'] = ta.momentum.rsi(df['close'])
-    macd = ta.trend.MACD(df['close'])
-    df['MACD'] = macd.macd()
-    df['MACD_Signal'] = macd.macd_signal()
-    df['ATR'] = ta.volatility.average_true_range(df['high'], df['low'], df['close'])
-    df['ROC'] = ta.momentum.roc(df['close'])
-    df['OBV'] = ta.volume.on_balance_volume(df['close'], df['volume'])
-    return df.dropna().reset_index(drop=True)
+for i in range(SEQUENCE_LENGTH, len(X_scaled)):
+    sequences.append(X_scaled[i-SEQUENCE_LENGTH:i])
+    timestamps.append(X.index[i])
 
-# ✅ Prepare sequence, scale, and predict class
-def predict(df):
-    features = ['EMA9', 'EMA21', 'VWAP', 'RSI', 'MACD', 'MACD_Signal', 'ATR', 'ROC', 'OBV']
-    seq = df[features].values[-60:]  # Last 60 intervals (~15 hours)
-    seq_scaled = scaler.transform(seq)
-    X = np.expand_dims(seq_scaled, axis=0)  # shape: (1, 60, num_features)
-    probs = model.predict(X)[0]
-    pred = np.argmax(probs)
-    return pred, probs
+X_seq = np.array(sequences)
 
-# ✅ Streamlit UI setup
-st.set_page_config(page_title="BTC 15-min AI Predictor", layout="wide")
-st.title("📈 BTC/USDT 15-Minute AI Prediction")
+# ✅ Predict
+preds = model.predict(X_seq, verbose=0)
+classes = np.argmax(preds, axis=1)  # 0=Short, 1=Neutral, 2=Long
 
-# ✅ Load and prepare data
-df = load_data()
-df = add_indicators(df)
+# ✅ Build final table
+results = pd.DataFrame({
+    'Timestamp': timestamps,
+    'Prediction': classes
+})
+results['Prediction Label'] = results['Prediction'].map({0: 'Short 📉', 1: 'Neutral ⚖️', 2: 'Long 📈'})
 
-# ✅ Run prediction
-pred, probs = predict(df)
-class_map = {0: "Short (🔴)", 1: "Neutral (⚪)", 2: "Long (🟢)"}
-
-# ✅ Show prediction
-st.subheader("Latest Prediction")
-st.markdown(f"## {class_map[pred]}")
-
-# ✅ Show prediction probabilities
-st.subheader("Confidence Levels")
-conf = {class_map[i]: f"{probs[i]*100:.2f}%" for i in range(len(probs))}
-st.write(conf)
-
-# ✅ Plot recent price with signal marker
-df_plot = df.iloc[-1:]
-fig = go.Figure()
-fig.add_trace(go.Scatter(
-    x=df['timestamp'], y=df['close'],
-    mode='lines', name='Close'
-))
-fig.add_trace(go.Scatter(
-    x=df_plot['timestamp'], y=df_plot['close'],
-    mode='markers', name='AI Signal',
-    marker=dict(color=['red', 'white', 'green'][pred], size=12)
-))
-st.plotly_chart(fig, use_container_width=True)
+# ✅ Display table
+st.subheader("🔮 BTC Class Predictions (Next 3 Candles / 90 Min Horizon)")
+st.dataframe(results.set_index('Timestamp').tail(20), use_container_width=True)

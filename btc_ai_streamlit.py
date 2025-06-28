@@ -1,72 +1,69 @@
-# btc_ai_streamlit.py
+# Deployed with Python3.10 runtime
 
 import streamlit as st
 import pandas as pd
 import numpy as np
+import plotly.graph_objs as go
 from tensorflow.keras.models import load_model
 from sklearn.preprocessing import StandardScaler
-import joblib
+import datetime
+import os
 
-# Constants
-MODEL_PATH = 'btc_lstm_model.keras'
-SCALER_MEAN_PATH = 'scaler_mean.npy'
-SCALER_SCALE_PATH = 'scaler_scale.npy'
-WINDOW_SIZE = 10
+# Load the scaler
+scaler = StandardScaler()
+scaler.mean_ = np.load('scaler_mean.npy')
+scaler.scale_ = np.load('scaler_scale.npy')
 
-# Load model and scaler
-@st.cache_resource
-def load_lstm_model():
-    return load_model(MODEL_PATH)
+# Load model
+model = load_model('btc_lstm_model.keras')
 
-@st.cache_resource
-def load_scaler():
-    scaler = StandardScaler()
-    scaler.mean_ = joblib.load(SCALER_MEAN_PATH)
-    scaler.scale_ = joblib.load(SCALER_SCALE_PATH)
-    return scaler
+# Define features
+FEATURES = ['EMA9', 'EMA21', 'VWAP', 'RSI', 'MACD', 'MACD_Signal', 'ATR', 'ROC', 'OBV']
 
-# Add indicators (assuming they’re already computed in CSV)
-def fetch_data():
-    df = pd.read_csv("btc_15min_data.csv")
-    return df.dropna()
-
-def create_sequences(data, window_size=10):
+def preprocess_input(df):
+    df = df.copy()
+    df = df[FEATURES]
+    data_scaled = scaler.transform(df)
     sequences = []
-    for i in range(len(data) - window_size):
-        seq = data[i:i+window_size]
-        sequences.append(seq)
+    for i in range(len(data_scaled) - 10):
+        sequences.append(data_scaled[i:i + 10])
     return np.array(sequences)
 
-def make_predictions(df, model, scaler, features):
-    df_scaled = df.copy()
-    df_scaled[features] = scaler.transform(df_scaled[features])
-    sequences = create_sequences(df_scaled[features], window_size=WINDOW_SIZE)
-
-    if len(sequences) == 0:
-        return pd.DataFrame()
-
-    preds = model.predict(sequences)
-    preds_classes = np.argmax(preds, axis=1)
-
-    pred_df = df.iloc[WINDOW_SIZE:].copy()
-    pred_df['Prediction'] = preds_classes
-    pred_df['Signal'] = pred_df['Prediction'].map({0: 'Short', 1: 'Neutral', 2: 'Long'})
-    return pred_df[['timestamp', 'close', 'Prediction', 'Signal']]
+# Load your crypto data
+@st.cache_data
+def load_data():
+    return pd.read_csv('btc_15min_data.csv')  # Ensure this file exists
 
 # Streamlit UI
-st.set_page_config(layout="wide", page_title="BTC AI Predictions")
+st.title("BTC AI 15-Min Prediction")
+df = load_data()
 
-st.title("🔮 BTC AI Live Prediction (15-min intervals)")
+# Display last few rows
+st.subheader("Recent Data")
+st.write(df.tail())
 
-df = fetch_data()
-features = ['EMA9', 'EMA21', 'VWAP', 'RSI', 'MACD', 'MACD_Signal', 'ATR', 'ROC', 'OBV']
+# Prediction
+if st.button("Predict"):
+    input_data = preprocess_input(df)
+    preds = model.predict(input_data)
+    pred_labels = np.argmax(preds, axis=1)
 
-model = load_lstm_model()
-scaler = load_scaler()
+    latest_preds = pred_labels[-5:]
+    st.subheader("Last 5 Predictions")
+    st.write(latest_preds)
 
-pred_df = make_predictions(df, model, scaler, features)
+    class_map = {0: 'Short (↓)', 1: 'Neutral (→)', 2: 'Long (↑)'}
+    mapped_preds = [class_map[i] for i in latest_preds]
+    st.write("Signals:", mapped_preds)
 
-if pred_df.empty:
-    st.warning("Not enough data to make predictions.")
-else:
-    st.dataframe(pred_df.tail(50), use_container_width=True)
+    # Plot signal zones
+    df_plot = df.iloc[-len(latest_preds):].copy()
+    df_plot['Prediction'] = mapped_preds
+
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(x=df_plot['timestamp'], y=df_plot['close'], mode='lines+markers', name='Close Price'))
+    fig.add_trace(go.Scatter(x=df_plot['timestamp'], y=df_plot['close'],
+                             mode='markers', name='Signal',
+                             marker=dict(size=10,
+                                         color=[{'Short (↓)': 'red', 'Neutral (→)': 'gray', 'Long (↑)': 'green'}[p] for p in mapped_preds])))
+    st.plotly_chart(fig, use_container_width=True)
